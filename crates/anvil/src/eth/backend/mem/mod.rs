@@ -3233,7 +3233,7 @@ impl Backend {
         let block = self.mined_block_by_hash(hash)?;
         let mut receipts = Vec::new();
         let storage = self.blockchain.storage.read();
-        for tx in block.body.transactions.iter().map(|tx| tx.hash()) {
+        for tx in block.transactions.hashes() {
             let receipt = storage.transactions.get(&tx)?.receipt.clone();
             receipts.push(receipt);
         }
