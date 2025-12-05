@@ -3060,7 +3060,7 @@ impl Backend {
         if let Some(block) = self.blockchain.get_block_by_hash(&block_hash) {
             // Get all transactions in the block
             let mut traces = Vec::new();
-            for tx in &block.transactions {
+            for tx in &block.body.transactions {
                 let tx_hash = tx.hash();
                 match self.debug_trace_transaction(tx_hash, opts.clone()).await {
                     Ok(trace) => {
@@ -3104,7 +3104,7 @@ impl Backend {
         if let Some(block) = self.get_block(BlockId::Number(BlockNumber::Number(number))) {
             // Get all transactions in the block
             let mut traces = Vec::new();
-            for tx in &block.transactions {
+            for tx in &block.body.transactions {
                 let tx_hash = tx.hash();
                 match self.debug_trace_transaction(tx_hash, opts.clone()).await {
                     Ok(trace) => {
@@ -3233,7 +3233,7 @@ impl Backend {
         let block = self.mined_block_by_hash(hash)?;
         let mut receipts = Vec::new();
         let storage = self.blockchain.storage.read();
-        for tx in block.transactions.hashes() {
+        for tx in block.body.transactions.iter().map(|tx| tx.hash()) {
             let receipt = storage.transactions.get(&tx)?.receipt.clone();
             receipts.push(receipt);
         }
