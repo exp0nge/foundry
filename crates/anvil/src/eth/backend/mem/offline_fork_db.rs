@@ -12,6 +12,7 @@ use alloy_rpc_types::BlockId;
 use foundry_evm::backend::{
     BlockchainDb, DatabaseError, DatabaseResult, RevertStateSnapshotAction, StateSnapshot,
 };
+use foundry_evm::fork::database::ForkDbStateSnapshot;
 use revm::{
     Database, DatabaseCommit,
     bytecode::Bytecode,
@@ -30,6 +31,92 @@ pub struct OfflineForkedDatabase {
     inner: ForkedDatabase,
 }
 
+/// A state snapshot that keeps fork reads local while replaying transactions.
+///
+/// The normal fork snapshot falls back to the remote provider for missing data.
+/// That is correct online, but violates Anvil's `--offline` contract during trace
+/// replay because replay receives a snapshot rather than the offline database
+/// wrapper.
+#[derive(Clone, Debug)]
+struct OfflineForkDbStateSnapshot {
+    inner: ForkDbStateSnapshot,
+}
+impl OfflineForkDbStateSnapshot {
+    fn new(inner: ForkDbStateSnapshot) -> Self {
+        Self { inner }
+    }
+}
+impl DatabaseRef for OfflineForkDbStateSnapshot {
+    type Error = DatabaseError;
+    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        if let Some(account) = self.inner.local.cache.accounts.get(&address) {
+            return Ok(Some(account.info.clone()));
+        }
+        if let Some(account) = self.inner.state_snapshot.accounts.get(&address) {
+            return Ok(Some(account.clone()));
+        }
+        Ok(None)
+    }
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        if code_hash == KECCAK_EMPTY {
+            return Ok(Bytecode::default());
+        }
+        if let Some(code) = self.inner.local.cache.contracts.get(&code_hash) {
+            return Ok(code.clone());
+        }
+        if let Some(code) = self.inner.local.cache.accounts.values().find_map(|account| {
+            (account.info.code_hash == code_hash).then(|| account.info.code.clone()).flatten()
+        }) {
+            return Ok(code);
+        }
+        if let Some(code) = self.inner.state_snapshot.accounts.values().find_map(|account| {
+            (account.code_hash == code_hash).then(|| account.code.clone()).flatten()
+        }) {
+            return Ok(code);
+        }
+        Ok(Bytecode::default())
+    }
+    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        if let Some(account) = self.inner.local.cache.accounts.get(&address) {
+            if let Some(value) = account.storage.get(&index) {
+                return Ok(*value);
+            }
+        }
+        if let Some(account_storage) = self.inner.state_snapshot.storage.get(&address) {
+            if let Some(value) = account_storage.get(&index) {
+                return Ok(*value);
+            }
+        }
+        Ok(U256::ZERO)
+    }
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        let number = U256::from(number);
+        if let Some(hash) = self.inner.state_snapshot.block_hashes.get(&number) {
+            return Ok(*hash);
+        }
+        if let Some(hash) = self.inner.local.cache.block_hashes.get(&number) {
+            return Ok(*hash);
+        }
+        Ok(B256::ZERO)
+    }
+}
+impl MaybeFullDatabase for OfflineForkDbStateSnapshot {
+    fn maybe_as_full_db(&self) -> Option<&HashMap<Address, DbAccount>> {
+        Some(&self.inner.local.cache.accounts)
+    }
+    fn clear_into_state_snapshot(&mut self) -> StateSnapshot {
+        self.inner.clear_into_state_snapshot()
+    }
+    fn read_as_state_snapshot(&self) -> StateSnapshot {
+        self.inner.read_as_state_snapshot()
+    }
+    fn clear(&mut self) {
+        self.inner.clear()
+    }
+    fn init_from_state_snapshot(&mut self, state_snapshot: StateSnapshot) {
+        self.inner.init_from_state_snapshot(state_snapshot)
+    }
+}
 impl OfflineForkedDatabase {
     pub fn new(inner: ForkedDatabase) -> Self {
         Self { inner }
@@ -222,6 +309,6 @@ impl Db for OfflineForkedDatabase {
     }
 
     fn current_state(&self) -> StateDb {
-        self.inner.current_state()
+        StateDb::new(OfflineForkDbStateSnapshot::new(self.inner.create_state_snapshot()))
     }
 }
